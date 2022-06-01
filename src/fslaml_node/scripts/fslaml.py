@@ -3,8 +3,9 @@
 from asyncio.proactor_events import _ProactorBaseWritePipeTransport
 import time
 import sys
+from cv2 import HOGDescriptor_DESCR_FORMAT_ROW_BY_ROW
 import numpy as np
-from math import sqrt, pi, cos, sin, atan2
+from math import sqrt, pi, cos, sin, atan2, floor
 from numpy.random import uniform
 
 import rospy
@@ -25,7 +26,7 @@ except BaseException as error:
 
 M_PARTICLES = 20
 ROOM_SIZE = 5
-MAP = np.array([[2,2], [3,4], [-3, -2]])
+MAP = np.array([[2,2], [3,-4], [-3, 2]])
 CAM_FOV = 90
 
 
@@ -37,10 +38,10 @@ def add_angle(ang1, ang2):
         return res + 2*pi
     return res
 
-# check if a given point is within a radius of a goal point
-def point_is_close(goal, point, radius):
-    d = sqrt(pow(goal[0]-point[0], 2) + pow(goal[1]-point[1], 2))
-    return lambda d : 1 if (d < radius) else 0
+def draw_arrow(img, center, orientation):
+    pass
+
+
 
 # Defines the shape of the particles
 class Particle():
@@ -64,27 +65,41 @@ class Particle_set():
 
 class LandmarkEKF():
     def __init__(self, mean, sigma, noise_teta, noise_d) -> None:
-        self.mean = np.array(mean) # [mean_x, mean_y]
-        self.sigma = np.matrix(sigma) # [sigma_x, sigma_y]
-        self.Qt = np.matrix([[noise_d, 0],[0, noise_teta]])
+        self.mean = np.array(np.reshape(mean, (2,1)))  # [mean_x, mean_y]
+        self.sigma = np.array(np.reshape(sigma, (2,2)))   # covariance matrix 
+        self.Qt = np.array([[noise_d, 0],[0, noise_teta]]) # noise in matrix form
 
     def update(self, d, teta):
         # predict part (in this case doesnt change anything?)
-        ut = self.mean
+        ut = np.reshape(self.mean, (2,1)) 
         sigmat = self.sigma
         # update part
-        Ht = np.matrix(
-            [[self.mean[0]/sqrt(self.mean[0]**2 + self.mean[1]**2), 
-            self.mean[0]/sqrt(self.mean[1]**2 + self.mean[1]**2)],
-            [-self.mean[1]/(self.mean[0]**2 + self.mean[1]**2),
-            1/(self.mean[0] + ((self.mean[1]**2)/self.mean[0]))]])
-        Kt = self.sigma * Ht.getT * np.linalg.inv(Ht * self.sigma * Ht.getT + self.Qt)
-        self.mean = ut + Kt*([d, teta] - Ht*ut)
-        self.sigma = (np.identity(2) - Kt*Ht)*sigmat
-        rospy.loginfo("Ht:")
-        rospy.loginfo(Ht)
-        rospy.loginfo("Kt:")
-        rospy.loginfo(Kt)
+        Ht = np.array(
+            [[self.mean[0][0]/sqrt(self.mean[0][0]**2 + self.mean[1][0]**2), 
+            self.mean[0][0]/sqrt(self.mean[1][0]**2 + self.mean[1][0]**2)],
+            [-self.mean[1][0]/(self.mean[0][0]**2 + self.mean[1][0]**2),
+            1/(self.mean[0][0] + ((self.mean[1][0]**2)/self.mean[0][0]))]])
+        Ht = np.reshape(Ht, (2,2))
+        #Ht = np.array(
+            # [[self.mean[0]/sqrt(self.mean[0]**2 + self.mean[1]**2), 
+            # self.mean[0]/sqrt(self.mean[1]**2 + self.mean[1]**2)],
+            # [-self.mean[1]/(self.mean[0]**2 + self.mean[1]**2),
+            # 1/(self.mean[0] + ((self.mean[1]**2)/self.mean[0]))]])
+        #Kt = self.sigma * Ht.getT() * np.linalg.inv(Ht * self.sigma * Ht.getT() + self.Qt)  
+        #rospy.loginfo(Ht)
+
+        temp = Ht @ sigmat @ Ht.T + self.Qt
+        temp = np.reshape(temp, (2,2))
+        #rospy.loginfo(temp)
+        Kt = sigmat @ Ht.T @ np.linalg.inv(temp)
+        zt = np.reshape([d, teta], (2,1)) 
+        # here need to check if it between 0 and 2pi, still need to make that func xd nad change all over the code for using it
+        self.mean = ut + Kt @ (zt - Ht @ ut)
+        self.sigma = (np.array([[1,0], [0,1]]) - Kt @ Ht) @ sigmat
+        # rospy.loginfo("Ht:")
+        # rospy.loginfo(Ht)
+        # rospy.loginfo("Kt:")
+        # rospy.loginfo(Kt)
     
 
 # Main class for implementing ROS stuff
@@ -106,51 +121,60 @@ class ParticleFilter():
         self.y = 0
         self.teta = 0
 
+    ################################################################################################################
         #TODO: this is an image representation, some kind of plot would be better, força malucos
     def draw_particles(self, img): 
         for p in self.Xt:
-            pose = (int(p.x*100) + 500, int(p.y*100) +500)
+            pose = (-1*floor(p.y*100) + 500, -1*floor(p.x*100) +500)
             cv2.circle(img, pose, 1, (200,170,0), cv2.FILLED)
             for lm in p.ldmrks:
-                lm_center = (int(lm.mean[1]*100)+500, int(lm.mean[0]*100)+500)
+                lm_center = (-1*floor(lm.mean[1][0]*100)+500, -1*floor(lm.mean[0][0]*100)+500)
                 cv2.circle(img, lm_center, 1, (0, 200, 255), cv2.FILLED)
-
+                
     # show robot state in an 1000X1000 image, each 100px corresponds to 1 metre
     def draw_real(self, img): #TODO add orientation to this representation so it looks nicer
-        true_pos = (int(self.x*100) + 500, int(self.y*100) +500)
+        true_pos = (-1*floor(self.y*100) + 500, -1*floor(self.x*100) +500)
         cv2.circle(img, true_pos, 4, (0, 255, 0), cv2.FILLED)
         for lm in MAP:
-            true_lm = (int(lm[1]*100) + 500, int(lm[0]*100) +500)
+            true_lm = (-1*floor(lm[1]*100) + 500, -1*floor(lm[0]*100) +500)
             cv2.circle(img, true_lm, 6, (0, 0, 255), cv2.FILLED)    
 
     def show_state(self):
         img = np.zeros((1000,1000,3), dtype=np.uint8)
+        cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
         self.draw_real(img)
         self.draw_particles(img)
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
+    ###############################################################################################################
         
     # this is for micro simulation only
     def sense(self, map):
-        ldmrks = []
+        detections = []
         fov = CAM_FOV/2*pi/180
-        lims = [add_angle(self.teta, fov), add_angle(self.teta, -fov)]
+        #lims = [add_angle(self.teta, fov), add_angle(self.teta, -fov)]
         for lm in map:
-            d = sqrt(pow(lm[0]-self.x, 2) + pow(lm[1]-self.y, 2))
+            d = sqrt((lm[0]-self.x)**2 + (lm[1]-self.y)**2)
             teta_d = atan2((lm[1]-self.y), (lm[0]-self.x))
             # add some noise
-            d += np.random.normal(0, abs(0.2*d))
-            teta_d += np.random.normal(0, abs(0.2*teta_d))
+            #d += np.random.normal(0, abs(0.2*d))
+            #teta_d += np.random.normal(0, abs(0.2*teta_d))
             if d <= 2: # sense only if its close
-                ldmrks.append([d, teta_d])  
-        return ldmrks
+                detections.append([d, teta_d])  
+            #rospy.loginfo(ldmrks)    
+        detections = np.array(detections) 
+        rospy.loginfo((self.x,self.y))
+        #rospy.loginfo(detections)
+        return detections
 
-    # check if a ldmark detected was already found, AKA perform very basic data association
-    def ldmrk_was_found(self, ldmrk):
-        for lm in self.Xt[0].ldmrks:
-            if point_is_close(lm, ldmrk):
-                return 1
-        return 0
-
+    # check if a given point is within a radius of a goal point
+    def check_close(self, particle, ldmrk, obsrv, radius):
+        obs_x = particle.x + obsrv[0]*cos(add_angle(particle.teta, obsrv[1]))
+        obs_y = particle.y + obsrv[1]*cos(add_angle(particle.teta, obsrv[1]))
+        #rospy.loginfo((obs_x, obs_y))
+        #rospy.loginfo("----------------")
+        #rospy.loginfo((ldmrk.mean[0], ldmrk.mean[1]))
+        d = sqrt((ldmrk.mean[0]-obs_x)**2 + (ldmrk.mean[1]-obs_y)**2)
+        return lambda d : 1 if (d < radius) else 0  
 
     def callback(self, odom, imu):
         # compute shift in particle due to control, Xt = Xt-1 + Ut + Et
@@ -168,29 +192,37 @@ class ParticleFilter():
         #calculate robot position (for micro-penis)
         self.teta = add_angle(self.teta, delta_teta + np.random.normal(0, abs(delta_teta/(2*1.645))))
         self.x += (delta_x + np.random.normal(0, abs(delta_x/(5*1.645))))*cos(self.teta)
-        self.y += (delta_x + np.random.normal(0, abs(delta_x/(5*1.645))))*sin(self.teta)
+        self.y += (delta_x + np.random.normal(0, abs(delta_x/(5*1.645))))*-sin(self.teta)
 
         # update particles with control input
         for i in range(len(self.Xt)):
             self.Xt[i].teta = add_angle(self.Xt[i].teta, delta_teta + np.random.normal(0, abs(delta_teta/(2*1.645))))
             self.Xt[i].x += (delta_x + np.random.normal(0, abs(delta_x/(5*1.645))))*cos(self.Xt[i].teta)
             self.Xt[i].y += (delta_x + np.random.normal(0, abs(delta_x/(5*1.645))))*sin(self.Xt[i].teta)
-        
+        #rospy.loginfo((self.x, self.y, self.teta))
+
         # update particles based on sensor data
-        found_ldmrks = self.sense(MAP)      # vector of pairs [d, teta]
+        detections = self.sense(MAP)      # vector of pairs [d, teta]
+        if len(detections) != 0:
+            rospy.loginfo((detections[0][0], detections[0][1]))
         # perform data association 
         # TODO: This loop is O(N*M*M_found), i think it can be O(N*log(M))
-        for p in self.Xt: # for each particle
-            for lm in found_ldmrks: # for each landmark found in this measurement ( this number is a small one so its not computanionally heavy)
-                for seen_lm in p.ldmrks: # the number of landmarks already seen, may be heavy depending on number of landmarks
-                    if point_is_close(lm, seen_lm, 0.3): # assume the measurement corresponds to a landmark that has been found
-                        seen_lm.update(lm[0], lm[1])
-                        continue
-                    # if landmark is not one that has been previously found, add it to the list
-                    x = p.x + lm[0]*cos(p.teta + lm[1])
-                    y = p.y + lm[0]*sin(p.teta + lm[1])
-                    p.ldmrks.append(LandmarkEKF(np.array([x,y]), np.matrix[[0.1, 0], [0, 0.1]], 0.1, 0.1))
-
+        for i in range(len(self.Xt)): # for each particle
+            for found_lm in detections: # for each landmark found in this measurement ( this number is a small one so its not computanionally heavy)
+                for seen_lm in self.Xt[i].ldmrks: # the number of landmarks already seen, may be heavy depending on number of landmarks
+                    # this data association can be improved?
+                    if self.check_close(self.Xt[i], seen_lm, found_lm, 0.3): # assume the measurement corresponds to a landmark that has been found
+                        #seen_lm.update(found_lm[0], found_lm[1])
+                        break
+                # if landmark is not one that has been previously found, add it to the list
+                x = self.Xt[i].x + found_lm[0]*cos(self.Xt[i].teta + found_lm[1])
+                y = self.Xt[i].y + found_lm[0]*sin(self.Xt[i].teta + found_lm[1])
+                #rospy.loginfo((x, y))
+                landmark = LandmarkEKF(np.array([x,y]), np.matrix([[0.1, 0], [0, 0.1]]), 0.1, 0.1)
+                self.Xt[i].ldmrks.append(landmark)
+        
+        if len(self.Xt[0].ldmrks):
+            pass #rospy.loginfo((self.Xt[0].ldmrks[0].mean[0][0], self.Xt[0].ldmrks[0].mean[1][0]))
 
         # calculate weights  
 
