@@ -24,7 +24,7 @@ try:
 except BaseException as error:
     pass
 
-M_PARTICLES = 20
+M_PARTICLES = 1
 ROOM_SIZE = 5
 MAP = np.array([[2,2], [3,-4], [-3, 2]])
 CAM_FOV = 90
@@ -72,16 +72,16 @@ class LandmarkEKF():
         self.sigma = np.array(np.reshape(sigma, (2,2)))   # covariance matrix 
         self.Qt = np.array([[noise_d, 0],[0, noise_teta]]) # noise in matrix form
 
-    def update(self, d, teta):
+    def update(self, d, teta, particle):
         # predict part (in this case doesnt change anything?)
         ut = np.reshape(self.mean, (2,1)) 
         sigmat = self.sigma
         # update part
         Ht = np.array(
-            [[self.mean[0][0]/sqrt(self.mean[0][0]**2 + self.mean[1][0]**2), 
-            self.mean[0][0]/sqrt(self.mean[1][0]**2 + self.mean[1][0]**2)],
-            [-self.mean[1][0]/(self.mean[0][0]**2 + self.mean[1][0]**2),
-            1/(self.mean[0][0] + ((self.mean[1][0]**2)/self.mean[0][0]))]])
+            [[(self.mean[0][0]- particle.x)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2), 
+              (self.mean[1][0]- particle.y)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)],
+            [ -(self.mean[1][0]- particle.y)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2),
+            (self.mean[0][0]- particle.x)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)]])
         Ht = np.reshape(Ht, (2,2))
         #Ht = np.array(
             # [[self.mean[0]/sqrt(self.mean[0]**2 + self.mean[1]**2), 
@@ -103,23 +103,23 @@ def data_association(particle, new_lm):
         return (-1, 0)
     x = particle.x + new_lm[0]*cos(particle.teta + new_lm[1])
     y = particle.y + new_lm[0]*sin(particle.teta + new_lm[1])
-    rospy.loginfo("###################################")
-    rospy.loginfo("(x, y) measured--------------------")
-    rospy.loginfo((x,y))
+    #rospy.loginfo("###################################")
+    #rospy.loginfo("(x, y) measured--------------------")
+    #rospy.loginfo((x,y))
     max, max_i = (0,0)
-    rospy.loginfo("lenght of ldmrks list--------------")
-    rospy.loginfo(len(particle.ldmrks))
+    #rospy.loginfo("lenght of ldmrks list--------------")
+    #rospy.loginfo(len(particle.ldmrks))
     for i, lm in enumerate(particle.ldmrks):
-        rospy.loginfo("(x, y), previous EKF estimation---")
-        rospy.loginfo((lm.mean[0][0], lm.mean[1][0]))
+        #rospy.loginfo("(x, y), previous EKF estimation---")
+        #rospy.loginfo((lm.mean[0][0], lm.mean[1][0]))
         temp = np.array([[x-lm.mean[0][0]], [y-lm.mean[1][0]]])
         temp = temp.T @ np.linalg.inv(lm.sigma) @ temp
         p = 1/(((2*pi))*sqrt(np.linalg.det(lm.sigma))) * exp(-0.5*temp[0][0])
         if p > max:
             max = p
             max_i = i
-    rospy.loginfo("(max_i, p), calculate probability--")
-    rospy.loginfo((max_i, p))
+    #rospy.loginfo("(max_i, p), calculate probability--")
+    #rospy.loginfo((max_i, p))
     return (max_i, max)
 
 # Main class for implementing ROS stuff
@@ -213,8 +213,6 @@ class ParticleFilter():
 
         first = 1
         for i in range(len(self.Xt)): # for each particle
-            if i > 0:
-                break
             for found_lm in detections: # for each landmark found in this measurement ( this number is a small one so its not computanionally heavy)
                 max_i, p = data_association(self.Xt[i], found_lm)
                 if p < detection_tresh or max_i == -1:  
@@ -225,7 +223,7 @@ class ParticleFilter():
                     self.Xt[i].ldmrks.append(landmark)
                 else:
                     # update an already found landmark
-                    self.Xt[i].ldmrks[max_i].update(found_lm[0], found_lm[1])
+                    self.Xt[i].ldmrks[max_i].update(found_lm[0], found_lm[1], self.Xt[i])
                 
                 # # old code:
                 # for seen_lm in self.Xt[i].ldmrks: # the number of landmarks already seen, may be heavy depending on number of landmarks
