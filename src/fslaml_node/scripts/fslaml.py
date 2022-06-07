@@ -3,7 +3,7 @@
 from asyncio.proactor_events import _ProactorBaseWritePipeTransport
 import time
 import sys
-from cv2 import HOGDescriptor_DESCR_FORMAT_ROW_BY_ROW
+from cv2 import CAP_OPENNI_ASUS, HOGDescriptor_DESCR_FORMAT_ROW_BY_ROW, mean
 import numpy as np
 from math import sqrt, pi, cos, sin, atan2, floor, exp
 from numpy.random import uniform
@@ -24,28 +24,14 @@ try:
 except BaseException as error:
     pass
 
-M_PARTICLES = 1
+M_PARTICLES = 20
 ROOM_SIZE = 5
 MAP = np.array([[2,2], [3,-4], [-3, 2]])
 CAM_FOV = 90
 
-def add_angle(ang1, ang2):
-    res = ang1 + ang2
-    if res > pi:
-        return res - 2*pi
-    if res < -pi:
-        return res + 2*pi
-    return res
+Q = np.diag([1.0, np.deg2rad(15)]) ** 2
+R = np.diag([1.0, np.deg2rad(15)]) ** 2
 
-#taken in an angle any and normalizes it between 
-def normalize_ang(angle, turns=0):
-    angle += pi
-    voltas = angle//(2*pi)
-    angle = angle%(2*pi) - pi
-    if turns:
-        return (angle, voltas)
-    return angle
-    
 # Defines the shape of the particles
 class Particle():
     def __init__(self, x, y, teta, ldmrks, w):
@@ -66,36 +52,93 @@ class Particle_set():
         ldmrks = []
         return Particle(p[0], p[1], p[2], ldmrks, 1)
 
-class LandmarkEKF():
-    def __init__(self, mean, sigma, noise_teta, noise_d) -> None:
-        self.mean = np.array(np.reshape(mean, (2,1)))  # [mean_x, mean_y]
-        self.sigma = np.array(np.reshape(sigma, (2,2)))   # covariance matrix 
-        self.Qt = np.array([[noise_d, 0],[0, noise_teta]]) # noise in matrix form
 
-    def update(self, d, teta, particle):
-        # predict part (in this case doesnt change anything?)
-        ut = np.reshape(self.mean, (2,1)) 
-        sigmat = self.sigma
-        # update part
-        Ht = np.array(
-            [[(self.mean[0][0]- particle.x)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2), 
-              (self.mean[1][0]- particle.y)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)],
-            [ -(self.mean[1][0]- particle.y)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2),
-            (self.mean[0][0]- particle.x)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)]])
-        Ht = np.reshape(Ht, (2,2))
-        #Ht = np.array(
-            # [[self.mean[0]/sqrt(self.mean[0]**2 + self.mean[1]**2), 
-            # self.mean[0]/sqrt(self.mean[1]**2 + self.mean[1]**2)],
-            # [-self.mean[1]/(self.mean[0]**2 + self.mean[1]**2),
-            # 1/(self.mean[0] + ((self.mean[1]**2)/self.mean[0]))]])
-        #Kt = self.sigma * Ht.getT() * np.linalg.inv(Ht * self.sigma * Ht.getT() + self.Qt)  
-        temp = Ht @ sigmat @ Ht.T + self.Qt
-        temp = np.reshape(temp, (2,2))
-        Kt = sigmat @ Ht.T @ np.linalg.inv(temp)
-        zt = np.reshape([d, teta], (2,1)) 
-        # here need to check if it between 0 and 2pi, still need to make that func xd nad change all over the code for using it
-        self.mean = ut + Kt @ (zt - Ht @ ut)
-        self.sigma = (np.array([[1,0], [0,1]]) - Kt @ Ht) @ sigmat
+def pi_2_pi(angle):
+    return (angle + pi) % (2 * pi) - pi
+
+def normalize_ang(angle, turns=0):
+    angle += pi
+    voltas = angle//(2*pi)
+    angle = angle%(2*pi) - pi
+    if turns:
+        return (angle, voltas)
+    return angle
+    
+def jacobian(particle, last_mean):
+    Ht = np.array(
+            [[(last_mean[0,0]- particle.x)/sqrt((last_mean[0,0]- particle.x)**2 + (last_mean[1,0]- particle.y)**2), 
+              (last_mean[1,0]- particle.y)/sqrt((last_mean[0,0]- particle.x)**2 + (last_mean[1,0]- particle.y)**2)],
+            [ -(last_mean[1,0]- particle.y)/((last_mean[0,0]- particle.x)**2 + (last_mean[1,0]- particle.y)**2),
+            (last_mean[0,0]- particle.x)/((last_mean[0,0]- particle.x)**2 + (last_mean[1,0]- particle.y)**2)]])
+    return Ht
+
+def new_ldmrk(particle, z):
+    # [x, y] = [d*cos(θ + θd), d*sin(θ + θd)]
+    mean_t = np.array([particle.x + z[0]*cos(pi_2_pi(particle.teta + z[1])), particle.y + z[0]*sin(pi_2_pi(particle.teta + z[1]))]).reshape(2,1)
+    H = jacobian(particle, mean_t)
+    H_inv = np.linalg.inv(H)
+    sigma = H_inv @ Q @ H_inv.T
+    landmark = LandmarkEKF(mean_t, sigma)
+    return landmark
+
+def predict_measurement(particle, mean):
+    d = sqrt( (mean[0,0] - particle.x)**2 + (mean[1,0] - particle.y)**2 )
+    teta = atan2(mean[1,0] - particle.y, mean[0,0] - particle.x) - particle.teta
+    return np.array([d, teta]).reshape(2,1)
+
+
+class LandmarkEKF():
+    def __init__(self, mean, sigma) -> None:
+        self.mean = np.array(np.reshape(mean, (2,1)))       # [mean_x, mean_y]
+        self.sigma = np.array(np.reshape(sigma, (2,2)))     # covariance matrix
+        self.w = 1/M_PARTICLES
+
+    def update(self, particle, z):
+        # measurement prediction
+        z_pred = predict_measurement(particle, self.mean)
+        z = z.reshape(2,1)
+        # compute jacobian of sensor model 
+        H = jacobian(particle, self.mean)
+        # measurement covariance
+        Qt = H @ self.sigma @ H.T + Q
+        Qt_inv = np.linalg.inv(Qt)
+        # compute kalman gain
+        K = self.sigma @ H.T @ Qt
+        c = (z - z_pred)
+        rospy.loginfo(z_pred)
+        # update mean: µ(t) = µ(t-1) + K (z - ẑ)
+        self.mean = self.mean + K @ c
+        # update covariance: Σ(t) = (I - K H) Σ(t-1) 
+        self.sigma = (np.identity(2) - K @ H) @ self.sigma
+        # weight:
+        e = c.T @ Qt_inv @ c
+        det = abs(np.linalg.det(Qt))
+        self.w = (1/sqrt(2*pi*det))*exp(-0.5*e[0,0])
+
+        # old code:
+        # ut = np.array(self.mean).reshape(2,1)
+        # sigmat = np.array(self.sigma).reshape(2,2)
+        # zt = np.reshape(z, (2,1))
+        # # update part
+        # Ht = np.array(
+        #     [[(self.mean[0][0]- particle.x)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2), 
+        #       (self.mean[1][0]- particle.y)/sqrt((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)],
+        #     [ -(self.mean[1][0]- particle.y)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2),
+        #     (self.mean[0][0]- particle.x)/((self.mean[0][0]- particle.x)**2 + (self.mean[1][0]- particle.y)**2)]])
+        # temp = Ht @ sigmat @ Ht.T + Q
+        # temp = np.reshape(temp, (2,2))
+        # Kt = sigmat @ Ht.T @ np.linalg.inv(temp)
+        # zt = np.reshape(z, (2,1)) 
+        # # here need to check if it between 0 and 2pi, still need to make that func xd nad change all over the code for using it
+        # cenas = Ht @ ut - np.array([[0], [particle.teta]])
+        # rospy.loginfo("####################################")
+        # rospy.loginfo(cenas)
+        # rospy.loginfo("------------------------------------")
+        # rospy.loginfo(zt)
+        # self.mean = ut + Kt @ (zt - cenas)
+        # rospy.loginfo("------------------------------------")
+        # rospy.loginfo(self.mean)
+        # self.sigma = (np.array([[1,0], [0,1]]) - Kt @ Ht) @ sigmat
     
 # particle.ldmrks is an EFK, new_lm is a [d, teta] pair
 def data_association(particle, new_lm):
@@ -114,7 +157,8 @@ def data_association(particle, new_lm):
         #rospy.loginfo((lm.mean[0][0], lm.mean[1][0]))
         temp = np.array([[x-lm.mean[0][0]], [y-lm.mean[1][0]]])
         temp = temp.T @ np.linalg.inv(lm.sigma) @ temp
-        p = 1/(((2*pi))*sqrt(np.linalg.det(lm.sigma))) * exp(-0.5*temp[0][0])
+        det = np.linalg.det(lm.sigma)
+        p = (1/(2*pi*sqrt(abs(det)))) * exp(-0.5*temp[0][0])
         if p > max:
             max = p
             max_i = i
@@ -179,8 +223,8 @@ class ParticleFilter():
             #d += np.random.normal(0, abs(0.2*d))
             #teta_d += np.random.normal(0, abs(0.2*teta_d))
             if d <= 2: # sense only if its close
-                detections.append([d, teta_d])  
-        detections = np.array(detections) 
+                detections.append([d, teta_d])
+        detections = np.array(detections)
         return detections
 
     def callback(self, odom, imu):
@@ -189,41 +233,37 @@ class ParticleFilter():
             self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
             return
 
-        ðT = (odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000 - self.prev[0])/1000000000
-        ðx = self.prev[1] * ðT
-        ðteta = self.prev[2] * ðT
+        # MOTION MODEL
+        dT = (odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000 - self.prev[0])/1000000000
+        dx = self.prev[1] * dT
+        dteta = self.prev[2] * dT
         self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
 
         #calculate robot position (for micro-simulation)
-        self.x += ðx*cos(self.teta)
-        self.y += ðx*sin(self.teta)
-        self.teta += ðteta
+        self.x += dx*cos(self.teta)
+        self.y += dx*sin(self.teta)
+        self.teta += dteta
         #rospy.loginfo((self.x, self.y, self.teta))
-        # update particles with control input
         for i in range(len(self.Xt)):       # TODO: find better variance values 
-            self.Xt[i].x += (ðx + np.random.normal(0, abs(ðx/(5*1.645))))*cos(self.Xt[i].teta)
-            self.Xt[i].y += (ðx + np.random.normal(0, abs(ðx/(5*1.645))))*sin(self.Xt[i].teta)
-            self.Xt[i].teta += (ðteta + np.random.normal(0, abs(ðteta/(2*1.645)))) 
+            self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(5*1.645))))*cos(self.Xt[i].teta)
+            self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(5*1.645))))*sin(self.Xt[i].teta)
+            self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/(2*1.645)))) 
 
         # update particles based on sensor data
         detections = self.sense(MAP)    # measurement = [d,teta] 
         detection_tresh = 0.01 # TODO: find the right value for this
-        # perform data association on a per particle basis
-        # TODO: This loop is O(N*M*M_found), i think it can be O(N*log(M))
 
-        first = 1
-        for i in range(len(self.Xt)): # for each particle
-            for found_lm in detections: # for each landmark found in this measurement ( this number is a small one so its not computanionally heavy)
-                max_i, p = data_association(self.Xt[i], found_lm)
+        # SENSOR UPDATE
+        for i in range(len(self.Xt)): 
+            for z in detections:
+                max_i, p = data_association(self.Xt[i], z)
                 if p < detection_tresh or max_i == -1:  
-                    # create new landmark
-                    x = self.Xt[i].x + found_lm[0]*cos(self.Xt[i].teta + found_lm[1])
-                    y = self.Xt[i].y + found_lm[0]*sin(self.Xt[i].teta + found_lm[1])
-                    landmark = LandmarkEKF(np.array([x,y]), np.array([[0.1, 0], [0, 0.1]]), 0.1, 0.1)
+                    # add new landmark
+                    landmark = new_ldmrk(self.Xt[i], z)
                     self.Xt[i].ldmrks.append(landmark)
                 else:
                     # update an already found landmark
-                    self.Xt[i].ldmrks[max_i].update(found_lm[0], found_lm[1], self.Xt[i])
+                    self.Xt[i].ldmrks[max_i].update(self.Xt[i], z)
                 
                 # # old code:
                 # for seen_lm in self.Xt[i].ldmrks: # the number of landmarks already seen, may be heavy depending on number of landmarks
