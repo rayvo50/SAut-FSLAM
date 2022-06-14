@@ -21,7 +21,7 @@ from tf.transformations import quaternion_from_euler, euler_from_quaternion
 # except BaseException as error:
 #     pass
 
-M_PARTICLES = 20
+M_PARTICLES = 100
 ROOM_SIZE = 5
 MAP = np.array([
     [2,2],
@@ -37,7 +37,7 @@ MAP = np.array([
     ])
 CAM_FOV = 90
 
-Q = np.diag([0.25, np.deg2rad(15)]) 
+Q = np.diag([0.3, np.deg2rad(20)]) 
 #R = np.diag([0.25, np.deg2rad(15)]) 
 
 # Defines the shape of the particles
@@ -63,13 +63,13 @@ class Particle_set():
 def pi_2_pi(angle):
     return (angle + pi) % (2 * pi) - pi
 
-def normalize_ang(angle, turns=0):
-    angle += pi
-    voltas = angle//(2*pi)
-    angle = angle%(2*pi) - pi
-    if turns:
-        return (angle, voltas)
-    return angle
+# def normalize_ang(angle, turns=0):
+#     angle += pi
+#     voltas = angle//(2*pi)
+#     angle = angle%(2*pi) - pi
+#     if turns:
+#         return (angle, voltas)
+#     return angle
     
 def jacobian(particle, last_mean):
     Ht = np.array(
@@ -85,7 +85,7 @@ def new_ldmrk(particle, z):
     H = jacobian(particle, mean_t)
     H_inv = np.linalg.inv(H)
     sigma = H_inv @ Q @ H_inv.T
-    landmark = LandmarkEKF(mean_t, sigma)
+    landmark = LandmarkEKF(mean_t, sigma, z[2])
     return landmark
 
 def predict_measurement(particle, mean):
@@ -95,15 +95,16 @@ def predict_measurement(particle, mean):
 
 
 class LandmarkEKF():
-    def __init__(self, mean, sigma) -> None:
+    def __init__(self, mean, sigma, id) -> None:
         self.mean = np.array(np.reshape(mean, (2,1)))       # [mean_x, mean_y]
         self.sigma = np.array(np.reshape(sigma, (2,2)))     # covariance matrix
         self.w = 1                                          # default weight for landmark
+        self.id = id
 
     def update(self, particle, z):
         # measurement prediction
         z_pred = predict_measurement(particle, self.mean)
-        z = z.reshape(2,1)
+        z = np.array([z[0], z[1]]).reshape(2,1)
         # compute jacobian of sensor model 
         H = jacobian(particle, self.mean)
         # measurement covariance
@@ -112,6 +113,7 @@ class LandmarkEKF():
         # compute kalman gain
         K = self.sigma @ H.T @ Qt
         c = (z - z_pred)
+        c[1,0] = pi_2_pi(c[1,0])
         # update mean: µ(t) = µ(t-1) + K (z - ẑ)
         self.mean = self.mean + K @ c
         # update covariance: Σ(t) = (I - K H) Σ(t-1) 
@@ -122,30 +124,25 @@ class LandmarkEKF():
         self.w = (1/sqrt(2*pi*det))*np.exp(-0.5*e[0,0])
     
 # particle.ldmrks is an EFK, new_lm is a [d, teta] pair
-def data_association(particle, new_lm):
-    if len(particle.ldmrks) == 0:
-        return (-1, -1)
-    x = particle.x + new_lm[0]*cos(particle.teta + new_lm[1])
-    y = particle.y + new_lm[0]*sin(particle.teta + new_lm[1])
-    #rospy.loginfo("###################################")
-    #rospy.loginfo("(x, y) measured--------------------")
-    #rospy.loginfo((x,y))
-    max, max_i = (0,0)
-    #rospy.loginfo("lenght of ldmrks list--------------")
-    #rospy.loginfo(len(particle.ldmrks))
+def data_association(particle, z):
     for i, lm in enumerate(particle.ldmrks):
-        #rospy.loginfo("(x, y), previous EKF estimation---")
-        #rospy.loginfo((lm.mean[0][0], lm.mean[1][0]))
-        temp = np.array([[x-lm.mean[0][0]], [y-lm.mean[1][0]]])
-        temp = temp.T @ np.linalg.inv(lm.sigma) @ temp
-        det = np.linalg.det(lm.sigma)
-        p = (1/(2*pi*sqrt(abs(det)))) * np.exp(-0.5*temp[0][0])
-        if p > max:
-            max = p
-            max_i = i
-    #rospy.loginfo("(max_i, p), calculate probability--")
-    #rospy.loginfo((max_i, p))
-    return (max_i, max)
+        if lm.id == z[2]:
+            return (i, 100)
+    return (-1, -1)
+    # if len(particle.ldmrks) == 0:
+    #     return (-1, -1)
+    # x = particle.x + z[0]*cos(particle.teta + z[1])
+    # y = particle.y + z[0]*sin(particle.teta + z[1])
+    # max, max_i = (0,0)
+    # for i, lm in enumerate(particle.ldmrks):
+    #     temp = np.array([[x-lm.mean[0][0]], [y-lm.mean[1][0]]])
+    #     temp = temp.T @ np.linalg.inv(lm.sigma) @ temp
+    #     det = np.linalg.det(lm.sigma)
+    #     p = (1/(2*pi*sqrt(abs(det)))) * np.exp(-0.5*temp[0][0])
+    #     if p > max:
+    #         max = p
+    #         max_i = i
+    # return (max_i, max)
 
 # Main class for implementing ROS stuff
 class ParticleFilter():
@@ -155,9 +152,12 @@ class ParticleFilter():
         self.particle_pub = particle_pub
         self.bridge = CvBridge()
         self.p_set = Particle_set()     # object to generate particles
-        self.prev = [0,0,0]             # previous control input 
         self.sample_counter = 0
         self.counter = 0
+
+        self.prev = [0,0,0]             # for computing u
+        self.u = []                     # last control input 
+        self.z = []                     # last sensor input
 
         self.Xt = []                                # Particles
         for i in range(M_PARTICLES):
@@ -225,15 +225,10 @@ class ParticleFilter():
         poses = []
         h = Header(self.counter, rospy.Time.now(), "base_footprint")
         for p in self.Xt:
-            point = Point()
-            point.x = p.x
-            point.y = p.y
-            point.z = 0
+            point = Point(p.x, p.y, 0)
             quat = quaternion_from_euler(0 ,0, pi_2_pi(p.teta))
             quat = Quaternion(quat[0], quat[1], quat[2], quat[3])
-            pose = Pose()
-            pose.position = point
-            pose.orientation = quat
+            pose = Pose(point, quat)
             poses.append(pose)
         pa = PoseArray(h, poses)
         self.particle_pub.publish(pa)
@@ -245,22 +240,21 @@ class ParticleFilter():
         detections = []
         fov = CAM_FOV/2*pi/180
         #lims = [add_angle(self.teta, fov), add_angle(self.teta, -fov)]
-        for lm in map:
+        for id, lm in enumerate(map):
             d = sqrt((lm[0]-self.x)**2 + (lm[1]-self.y)**2)
             teta_d = atan2((lm[1]-self.y), (lm[0]-self.x)) - self.teta
             # add some noise
             #d += np.random.normal(0, abs(0.2*d))
             #teta_d += np.random.normal(0, abs(0.2*teta_d))
             if d <= 2: # sense only if its close
-                detections.append([d, pi_2_pi(teta_d)])
+                detections.append([d, pi_2_pi(teta_d), id])
         detections = np.array(detections)
         return detections
 
     def normalize_weights(self):        # O(M)
-        w_sum = np.sum(self.w)
-        return np.array(self.w) / w_sum    
+        self.w = np.array(self.w) / np.sum(self.w)   
     
-    def low_variance_resample(self):    # O(M) ou O(M²) ?
+    def low_variance_resample(self):    # O(M*log(M))
         #TODO: Add n_eff
         Xt = []
         r = np.random.uniform(0, 1/M_PARTICLES)
@@ -280,6 +274,32 @@ class ParticleFilter():
         # first message must be ignored in order to compute ΔT
         if self.prev == [0,0,0]:
             self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+            self.u = [0,0]
+            self.z = []
+            return
+        # ignore messages with very low velocitiess
+        if odom.twist.twist.linear.x < 0.007 and odom.twist.twist.angular.z < 0.007:
+            self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+            self.u = [0,0]
+            self.z = []
+            return
+
+        # Compute u
+        dT = (odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000 - self.prev[0])/1000000000
+        dx = self.prev[1] * dT
+        dteta = self.prev[2] * dT
+        self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+        self.u =  [dx, dteta]
+
+        # generate z based on microsimulation
+        self.z = self.sense(MAP)    # measurement = [d,teta]
+        
+
+
+    def process(self):
+        # first message must be ignored in order to compute ΔT
+        if self.prev == [0,0,0]:
+            self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
             return
 
         if odom.twist.twist.linear.x < 0.007 and odom.twist.twist.angular.z < 0.007:
@@ -295,77 +315,77 @@ class ParticleFilter():
         #calculate robot position (for micro-simulation)
         self.x += dx*cos(self.teta)
         self.y += dx*sin(self.teta)
-        self.teta += dteta
-        self.teta = pi_2_pi(self.teta)
-        #rospy.loginfo((self.x, self.y, self.teta))
-        for i in range(len(self.Xt)):       # TODO: find better variance values 
+        self.teta = pi_2_pi(self.teta + dteta)
+
+        for i in range(len(self.Xt)):       # TODO: find better variance values
             self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(5*1.645))))*cos(self.Xt[i].teta)
             self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(5*1.645))))*sin(self.Xt[i].teta)
             self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/(2*1.645))))
-            self.Xt[i].teta = pi_2_pi(self.Xt[i].teta) 
+            self.Xt[i].teta = pi_2_pi(self.Xt[i].teta)
         
         # update particles based on sensor data
-        detections = self.sense(MAP)    # measurement = [d,teta] 
-        detection_tresh = 0.01 # TODO: find the right value for this
+        detections = self.sense(MAP)    # measurement = [d,teta]
+        detection_tresh = 0.0001 # TODO: find the right value for this
         #rospy.loginfo(detections)
         if len(detections) == 0:
             self.show_state()
             self.send_info()
             return
 
-        #print("check")
-
         # SENSOR UPDATE
         weights = []
-        for i in range(len(self.Xt)): 
+        for i in range(len(self.Xt)):
             for z in detections:
                 max_i, p = data_association(self.Xt[i], z)
-                if p < detection_tresh or max_i == -1:  
+                if p < detection_tresh or max_i == -1:
                     # add new landmark
                     landmark = new_ldmrk(self.Xt[i], z)
                     self.Xt[i].ldmrks.append(landmark)
                 else:
                     # update an already found landmark
-                    self.Xt[i].ldmrks[max_i].update(self.Xt[i], z)          
+                    self.Xt[i].ldmrks[max_i].update(self.Xt[i], z)     
 
-         # calculate weights 
-            w = 1
+         # calculate weights
+            w = 1/M_PARTICLES
             for lm in self.Xt[i].ldmrks:
-                w = w*lm.w
+                if w < lm.w:
+                    w = lm.w    
             weights.append(w)
-        if len(weights) == M_PARTICLES:    
+        if len(weights) == M_PARTICLES:
             self.w = np.array(weights)
-        self.w = self.normalize_weights()
+        self.normalize_weights()
 
         #rospy.loginfo(len(self.Xt[0].ldmrks))
         self.show_state()
         self.send_info()
 
         # RESAMPLING
-        if self.sample_counter > 10:
+        if self.sample_counter > 1:
             self.Xt = self.low_variance_resample()
             self.sample_counter = 0
         self.sample_counter +=1
 
-        
 
 def main(args):
     rospy.init_node('FSLAML_node', anonymous=True)
-    rospy.loginfo('Python version: ' + sys.version)
+    rospy.loginfo('Initializing FastSLAM1.0 node withPython version: ' + sys.version)
+
     odom_sub = Subscriber('odom', Odometry)
     imu_sub = Subscriber('imu', Imu)
     #scan_sub = Subscriber('lidar', PointCloud2)
     info_pub = rospy.Publisher('info', String, queue_size=2)
     image_pub = rospy.Publisher('particles_img', Image, queue_size=2)
     particle_pub = rospy.Publisher('particles_poses', PoseArray, queue_size=2)
-    pf = ParticleFilter(info_pub, image_pub, particle_pub)
 
+    pf = ParticleFilter(info_pub, image_pub, particle_pub)
+    rate = rospy.Rate(10)
     ats = ApproximateTimeSynchronizer([odom_sub, imu_sub], queue_size=10, slop=0.3, allow_headerless=False)
     ats.registerCallback(pf.callback)
-    plt.ion()
-    plt.show()
-    rospy.spin()
 
+    while not rospy.is_shutdown:
+        pf.process()
+        rate.sleep()
+    
 
 if __name__ == '__main__':
     try:
