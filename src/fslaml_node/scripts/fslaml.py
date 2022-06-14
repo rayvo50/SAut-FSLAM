@@ -21,7 +21,7 @@ from tf.transformations import quaternion_from_euler, euler_from_quaternion
 # except BaseException as error:
 #     pass
 
-M_PARTICLES = 100
+M_PARTICLES = 20
 ROOM_SIZE = 5
 MAP = np.array([
     [2,2],
@@ -155,11 +155,13 @@ class ParticleFilter():
         self.sample_counter = 0
         self.counter = 0
 
-        self.prev = [0,0,0]             # for computing u
-        self.u = []                     # last control input 
-        self.z = []                     # last sensor input
+        # variables for saving latest ROS msgs
+        self.prev = [0,0,0]          
+        self.odom_data = [0,0,0]                # latest odometry msgs
+        self.sensor_data = []                   # last sensor input
 
-        self.Xt = []                                # Particles
+        # Particles
+        self.Xt = []
         for i in range(M_PARTICLES):
             self.Xt.append(self.p_set.gen_random())
         self.w = np.ones(M_PARTICLES)  # + 1/M_PARTICLES
@@ -209,18 +211,19 @@ class ParticleFilter():
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
 
     def plot(self):
-        if self.counter %10 == 0:
-            x = []
-            y = []
-            for p in self.Xt:
-                x.append(p.x)
-                y.append(-p.y)
-            plt.plot(x, y, 'o')
-            plt.axis([-5,5,-5,5])
+        plt.clf()
+        plt.axis([-5,5,-5,5])
+        for p in self.Xt:
+        #p = self.Xt[17]
+            plt.plot(-p.y, p.x, 'o')
+            for lm in p.ldmrks:
+                xl = lm.mean[0,0]
+                yl = lm.mean[1,0]
+                print()
+                plt.plot(-yl, xl, 'x')
             plt.draw()        
             plt.pause(0.00000000001)
-        self.counter +=1
-    
+        
     def send_info(self):
         poses = []
         h = Header(self.counter, rospy.Time.now(), "base_footprint")
@@ -270,74 +273,52 @@ class ParticleFilter():
         self.w = np.ones(M_PARTICLES) #/M_PARTICLES  
         return Xt
 
+    # save information from ROS msgs into class variables
     def callback(self, odom, imu):
-        # first message must be ignored in order to compute ΔT
-        if self.prev == [0,0,0]:
-            self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
-            self.u = [0,0]
-            self.z = []
-            return
-        # ignore messages with very low velocitiess
-        if odom.twist.twist.linear.x < 0.007 and odom.twist.twist.angular.z < 0.007:
-            self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
-            self.u = [0,0]
-            self.z = []
-            return
-
-        # Compute u
-        dT = (odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000 - self.prev[0])/1000000000
-        dx = self.prev[1] * dT
-        dteta = self.prev[2] * dT
-        self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
-        self.u =  [dx, dteta]
-
-        # generate z based on microsimulation
-        self.z = self.sense(MAP)    # measurement = [d,teta]
-        
+        self.odom_data = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+        self.sensor_data = self.sense(MAP)
 
 
     def process(self):
-        # first message must be ignored in order to compute ΔT
-        if self.prev == [0,0,0]:
-            self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+        odom_data = self.odom_data
+        sensor_data = self.sensor_data
+
+        if self.prev == [0,0,0]:             # first message must be ignored in order to compute ΔT
+            self.prev = odom_data
             return
 
-        if odom.twist.twist.linear.x < 0.007 and odom.twist.twist.angular.z < 0.007:
-            self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+        if abs(odom_data[1]) < 0.007 and abs(odom_data[2]) < 0.007:
+            self.prev = odom_data
             return
 
-        # MOTION MODEL
-        dT = (odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000 - self.prev[0])/1000000000
-        dx = self.prev[1] * dT
+        dT = (odom_data[0] - self.prev[0])/1000000000
+        dx = self.prev[1] * dT          # use the average between self.prev and odom_data?
         dteta = self.prev[2] * dT
-        self.prev = self.prev = [odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z]
+        self.prev = odom_data
 
-        #calculate robot position (for micro-simulation)
+        #calculate true robot position (for micro-simulation)
         self.x += dx*cos(self.teta)
         self.y += dx*sin(self.teta)
         self.teta = pi_2_pi(self.teta + dteta)
-
-        for i in range(len(self.Xt)):       # TODO: find better variance values
+        for i in range(len(self.Xt)):
             self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(5*1.645))))*cos(self.Xt[i].teta)
             self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(5*1.645))))*sin(self.Xt[i].teta)
             self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/(2*1.645))))
             self.Xt[i].teta = pi_2_pi(self.Xt[i].teta)
-        
+        rospy.loginfo((self.x, self.y, self.teta))
+
         # update particles based on sensor data
-        detections = self.sense(MAP)    # measurement = [d,teta]
-        detection_tresh = 0.0001 # TODO: find the right value for this
-        #rospy.loginfo(detections)
-        if len(detections) == 0:
+        if len(sensor_data) == 0:        # dont update EKFs if no landmarks were found
             self.show_state()
-            self.send_info()
+            self.plot()
             return
 
         # SENSOR UPDATE
         weights = []
         for i in range(len(self.Xt)):
-            for z in detections:
+            for z in sensor_data:
                 max_i, p = data_association(self.Xt[i], z)
-                if p < detection_tresh or max_i == -1:
+                if p < 0.1 or max_i == -1:
                     # add new landmark
                     landmark = new_ldmrk(self.Xt[i], z)
                     self.Xt[i].ldmrks.append(landmark)
@@ -357,13 +338,13 @@ class ParticleFilter():
 
         #rospy.loginfo(len(self.Xt[0].ldmrks))
         self.show_state()
-        self.send_info()
+        self.plot()
 
         # RESAMPLING
-        if self.sample_counter > 1:
-            self.Xt = self.low_variance_resample()
-            self.sample_counter = 0
-        self.sample_counter +=1
+        # if self.sample_counter > 1:
+        #     self.Xt = self.low_variance_resample()
+        #     self.sample_counter = 0
+        # self.sample_counter +=1
 
 
 def main(args):
@@ -382,9 +363,10 @@ def main(args):
     ats = ApproximateTimeSynchronizer([odom_sub, imu_sub], queue_size=10, slop=0.3, allow_headerless=False)
     ats.registerCallback(pf.callback)
 
-    while not rospy.is_shutdown:
+    while not rospy.is_shutdown():
         pf.process()
         rate.sleep()
+    #rospy.spin()
     
 
 if __name__ == '__main__':
