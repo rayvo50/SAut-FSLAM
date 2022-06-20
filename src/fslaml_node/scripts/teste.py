@@ -15,7 +15,7 @@ def show_image(img):
     '''
     
     cv2.imshow('', img)
-    cv2.waitKey(2000)
+    cv2.waitKey(10000)
     
 def generate_color():
     '''
