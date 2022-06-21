@@ -2,6 +2,7 @@
 
 import time
 import sys
+from matplotlib.font_manager import _Weight
 import numpy as np
 from math import sqrt, pi, cos, sin, atan2, floor
 
@@ -18,7 +19,14 @@ from tf.transformations import quaternion_from_euler
 
 from proscrutes import *
 
-M_PARTICLES = 50
+
+M_PARTICLES = 50        # number os particles 
+KIDNAP_TRESH = 0.05     # minimum sum of weights that are acceptable during normal excution of the algorithm
+
+QT = np.diag([0.3, np.deg2rad(20)])         # sensor model covariance
+#R = np.diag([0.25, np.deg2rad(15)])        # motion model covariance
+
+# micro simulation
 ROOM_SIZE = 5
 MAP = np.array([
     [2,2],
@@ -35,9 +43,6 @@ MAP = np.array([
 CAM_FOV = 90
 COLORS = [(0,0,255/255),(0,128/255,255/255),(0,255/255,255/255),(128/255,128/255,128/255),(0,255/255,0),(255/255,255/255,0),(255/255,128/255,0),(255/255,0,0),(255/255,0,128/255),(255/255,0,255/255)]
 
-
-QT = np.diag([0.3, np.deg2rad(20)])
-#R = np.diag([0.25, np.deg2rad(15)]) 
 
 # Defines the shape of the particles
 #TODO: add garbage collection?
@@ -71,7 +76,8 @@ class LandmarkEKF():
         self.sigma = np.array(np.reshape(sigma, (2,2)))     # covariance matrix
         self.id = id
 
-    def update(self, particle, z):
+
+    def update(self, particle, z, dont_update = 0):
         # measurement prediction
         z_pred = predict_measurement(particle, self.mean)
         z = np.array([z[0], z[1]]).reshape(2,1)
@@ -84,16 +90,19 @@ class LandmarkEKF():
         K = self.sigma @ H.T @ Q_inv
         c = (z - z_pred)
         c[1,0] = pi_2_pi(c[1,0])
+        
+        # Compute weight
+        e = c.T @ Q_inv @ c
+        det = abs(np.linalg.det(Q))
+        weight = (1/(2*pi*sqrt(det)))*np.exp(-0.5*e[0,0])
+
         # update mean: µ(t) = µ(t-1) + K (z - ẑ)
         self.mean = self.mean + K @ c
         # update covariance: Σ(t) = (I - K H) Σ(t-1) 
         self.sigma = (np.identity(2) - K @ H) @ self.sigma
-        # if self.sigma[0,0] < 0.001 or self.sigma[1,1] < 0.001:
-        #     self.sigma = np.array([[0.001, 0.00001],[0.00001,0.001]])
-        # compute weight:
-        e = c.T @ Q_inv @ c
-        det = abs(np.linalg.det(Q))
-        return (1/(2*pi*sqrt(det)))*np.exp(-0.5*e[0,0])
+
+
+        return weight
 
 def pi_2_pi(angle):
     return (angle + pi) % (2 * pi) - pi
@@ -151,6 +160,7 @@ def data_association(particle, z):
     #         max_i = i
     # return (max_i, max)
 
+# Utility function to draw  results
 def draw_m_2_px(img, map, pose):
     pose = (-1*floor(pose[1]*100) + 500, -1*floor(pose[0]*100) +500)
     cv2.circle(img, pose, 1, (200,170,0), cv2.FILLED)
@@ -171,6 +181,7 @@ class ParticleFilter():
         self.sample_counter = 0
         self.seq = 0
         self.counter = 0
+        self.mode = "SLAM"              # "SLAM" or "LOCA" if robot is in slam mode or localization mode
 
         # variables for saving latest ROS msgs
         self.prev = [0,0,0]          
@@ -188,7 +199,7 @@ class ParticleFilter():
         self.y = 0
         self.teta = 0
 
-    def scatter(self):
+    def scatter_particles(self):
         v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
         self.x = v[0]
         self.y = v[1]
@@ -406,12 +417,6 @@ class ParticleFilter():
             self.prev = odom_data
             return
 
-        # print(self.counter)
-        # if self.counter == 1000:
-        #     print("OH SHIT  I'VE BEEN KIDNAPPED TIME TO SCATTER THEESE BITCHES")
-        #     self.scatter()
-        # self.counter +=1
-
         dT = (odom_data[0] - self.prev[0])/1000000000
         dx = self.prev[1] * dT          # use the average between self.prev and odom_data?
         dteta = self.prev[2] * dT
@@ -421,18 +426,19 @@ class ParticleFilter():
         self.x += dx*cos(self.teta)
         self.y += dx*sin(self.teta)
         self.teta = pi_2_pi(self.teta + dteta)
+
+        # update particles with input:
+
         for i in range(len(self.Xt)):
-            self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(1*1.645))))*cos(self.Xt[i].teta)
-            self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(1*1.645))))*sin(self.Xt[i].teta)
-            self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta)))
+            self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(5*1.645))))*cos(self.Xt[i].teta)
+            self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(5*1.645))))*sin(self.Xt[i].teta)
+            self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/5)))
             self.Xt[i].teta = pi_2_pi(self.Xt[i].teta)
 
         # update particles based on sensor data
         if len(sensor_data) == 0:        # dont update EKFs if no landmarks were found
             self.align_ldmrks_and_plot()
             return
-
-
 
         # SENSOR UPDATE
         weights = []
@@ -451,6 +457,11 @@ class ParticleFilter():
             weights.append(weight)
         self.w = np.array(weights)
 
+        # check if weights are OK
+        #print(np.sum(self.w))
+        if np.sum(self.w) < KIDNAP_TRESH:
+            print("** SHIT I'VE BEEND KIDNAPPED, CHANGING TO LOCALIZATINO MODE **")
+            self.mode = "LOCA"
         #if np.sum(self.w) < 0.001:
             # entrar em modo localization:
                 # não dar update em EKFs
