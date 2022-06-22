@@ -11,7 +11,7 @@ def show_image(img):
     Displays an image
     Args:
         img(a NumPy array of type uint 8) an image to be
-        dsplayed
+        dsplayedl
     '''
     
     cv2.imshow('', img)
@@ -118,8 +118,7 @@ def get_rotation_scale(reference_shape, shape):
         scale(float), a scaling factor
         theta(float), a rotation angle in radians
     '''
-    print(shape)
-    print(reference_shape)
+    
     a = np.dot(shape, reference_shape) / norm(reference_shape)**2
     
     #separate x and y for the sake of convenience
@@ -187,7 +186,8 @@ def procrustes_analysis(reference_shape, shape):
  
     translate(temp_ref)
     translate(temp_sh)
-    
+
+   
     #get scale and rotation
     scale, theta = get_rotation_scale(temp_ref, temp_sh)
     
@@ -198,21 +198,31 @@ def procrustes_analysis(reference_shape, shape):
     return aligned_shape
 
 if __name__ == '__main__':
-    
+
     canvas, triangles = create_test_set()
-    #get translation of reference landmark
-    x,y = get_translation(triangles[0])
+
+    ref = [ 1.11186854, -0.99656657 ,-0.9501971 , -0.00512851  ,0.15564917 ,-2.00017548,
+ -0.94977429,  0.9558844 ,  2.02466692 , 2.03290528  ,1.97740825  ,3.06647447,
+ -0.88556303 ,-2.05837278 , 3.15491252 ,-3.99106038 , 3.20051511, -1.01166228]
+
+    shape =[ 1.14883702 ,-0.92321429 ,-0.89119565, -0.05043701,  0.24630644 ,-1.9960335,
+ -0.94110346 , 0.91458247 , 1.98313063 , 2.06240182 , 1.9039985 ,  3.07140482,
+ -0.7645348  ,-2.10486064 , 3.36085389 ,-3.73181891 , 3.17604068 ,-0.75718961]
+
+    x,y = get_translation(ref)
     #create array for new shapes, append reference shape to it
     new_shapes = []
-    new_shapes.append(triangles[0])
+    new_shapes.append(ref)
+
     
     # superimpose all shapes to reference shape
-    for i in range(1,5):
-        new_shape = procrustes_analysis(triangles[0], triangles[i])
-        new_shape[::2] = new_shape[::2] + x
-        new_shape[1::2] = new_shape[1::2] + y
-        new_shapes.append(new_shape)
+    new_shape = procrustes_analysis(ref, shape)
+    new_shape[::2] = new_shape[::2] + x
+    new_shape[1::2] = new_shape[1::2] + y
+    new_shapes.append(new_shape)
     new_shapes = np.array(new_shapes)
+
+    new_shapes = new_shapes*50 +200
     draw_shapes(canvas, new_shapes.astype(int))
 
 # if __name__ == '__main__':

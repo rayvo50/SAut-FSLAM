@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
+from mmap import MAP_ANON
 import time
 import sys
-from matplotlib.font_manager import _Weight
 import numpy as np
 from math import sqrt, pi, cos, sin, atan2, floor
 
@@ -15,13 +15,14 @@ from std_msgs.msg import String, Header
 from sensor_msgs.msg import Imu, Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose, PoseArray, Point, Quaternion
+from fiducial_msgs.msg import FiducialTransformArray
 from tf.transformations import quaternion_from_euler
 
 from proscrutes import *
 
 
-M_PARTICLES = 50        # number os particles 
-KIDNAP_TRESH = 0.05     # minimum sum of weights that are acceptable during normal excution of the algorithm
+M_PARTICLES = 20       # number os particles 
+KIDNAP_TRESH = 0.001     # minimum sum of weights that are acceptable during normal excution of the algorithm
 
 QT = np.diag([0.3, np.deg2rad(20)])         # sensor model covariance
 #R = np.diag([0.25, np.deg2rad(15)])        # motion model covariance
@@ -57,7 +58,8 @@ class Particle():
         new = Particle(self.x, self.y, self.teta, self.ldmrks)
         return new
 
-# Utility for manipulating particle sets 
+
+# Utility for manipulating particle sets , this will be removed lol
 # TODO: this class is useless, can be removed and this becomes just a function, also, add it to other file like "particle.py"
 class Particle_set():
     def __init__(self) -> None:
@@ -76,16 +78,19 @@ class LandmarkEKF():
         self.sigma = np.array(np.reshape(sigma, (2,2)))     # covariance matrix
         self.id = id
 
+    def comp_w8_gains(self, particle, z):
 
-    def update(self, particle, z, dont_update = 0):
         # measurement prediction
         z_pred = predict_measurement(particle, self.mean)
         z = np.array([z[0], z[1]]).reshape(2,1)
+
         # compute jacobian of sensor model 
         H = jacobian(particle, self.mean)
+
         # measurement covariance
         Q = H @ self.sigma @ H.T + QT
         Q_inv = np.linalg.inv(Q)
+
         # compute kalman gain
         K = self.sigma @ H.T @ Q_inv
         c = (z - z_pred)
@@ -96,13 +101,29 @@ class LandmarkEKF():
         det = abs(np.linalg.det(Q))
         weight = (1/(2*pi*sqrt(det)))*np.exp(-0.5*e[0,0])
 
+        # save information for updating EKF later
+        self.K = K
+        self.c = c
+        self.H = H
+        
+        return weight   
+
+    def update(self):
+        
+        K = self.K
+        c = self.c
+        H = self.H
+
         # update mean: µ(t) = µ(t-1) + K (z - ẑ)
         self.mean = self.mean + K @ c
+        
         # update covariance: Σ(t) = (I - K H) Σ(t-1) 
         self.sigma = (np.identity(2) - K @ H) @ self.sigma
+    
+    def copy(self):
+        new = LandmarkEKF(self.mean, self.sigma, self.id)
+        return new
 
-
-        return weight
 
 def pi_2_pi(angle):
     return (angle + pi) % (2 * pi) - pi
@@ -163,11 +184,11 @@ def data_association(particle, z):
 # Utility function to draw  results
 def draw_m_2_px(img, map, pose):
     pose = (-1*floor(pose[1]*100) + 500, -1*floor(pose[0]*100) +500)
-    cv2.circle(img, pose, 1, (200,170,0), cv2.FILLED)
+    cv2.circle(img, pose, 2, (0,153,76), cv2.FILLED)
     map = map.reshape(-1, 2)
     for lm in map:
         lm_center = (-1*floor(lm[1]*100)+500, -1*floor(lm[0]*100)+500)
-        cv2.circle(img, lm_center, 1, (0, 200, 255), cv2.FILLED)
+        cv2.circle(img, lm_center, 2, (0, 128, 255), cv2.FILLED)
 
 
 # Main class for implementing ROS stuff
@@ -181,7 +202,9 @@ class ParticleFilter():
         self.sample_counter = 0
         self.seq = 0
         self.counter = 0
+        self.scatter_counter = 0
         self.mode = "SLAM"              # "SLAM" or "LOCA" if robot is in slam mode or localization mode
+        self.best_map = []
 
         # variables for saving latest ROS msgs
         self.prev = [0,0,0]          
@@ -192,69 +215,61 @@ class ParticleFilter():
         self.Xt = []
         for i in range(M_PARTICLES):
             self.Xt.append(self.p_set.gen_random())
-        self.w = np.ones(M_PARTICLES)  # + 1/M_PARTICLES
+        self.w = np.ones(M_PARTICLES)
 
         #for simulation (true pose of robot)
         self.x = 0
         self.y = 0
         self.teta = 0
 
-    def scatter_particles(self):
-        v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
-        self.x = v[0]
-        self.y = v[1]
-        self.teta = v[2]
+    def scatter_particles(self, pose=0):
+        if pose:
+            v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
+            self.x = 2
+            self.y = -2
+            self.teta = 1.6
         
+        map = self.Xt[np.argmax(self.w)].ldmrks
+    
         for i in range(len(self.Xt)):
             v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
             self.Xt[i].x = v[0]
             self.Xt[i].y = v[1]
             self.Xt[i].teta = v[2]
+            ldmrks = []
+            for lm in map:
+                new_lm = lm.copy()
+                ldmrks.append(new_lm)
+            self.Xt[i].ldmrks = ldmrks
 
-    def align_ldmrks_and_plot(self):
-        # transform data into a cute little way
-        maps = []
-        poses = []
-        for p in self.Xt:
-            map = []
-            for lm in p.ldmrks:
-                map.append([lm.mean[0,0], lm.mean[1,0]])
-            map = np.array(map).reshape(1, 2*len(map))
-            maps.append(map)
-            poses.append(np.array([p.x, p.y, p.teta]))
 
-        # for now reference will be the map from the first particle
-        ref = maps[0]
+    # TODO: make reference the best particle and try to always match with previous particle. this can be done in a separte node when map quality is decent
+    def align_maps_and_plot(self, new_map, new_pose):
+
+        ref = self.best_map
+        l = len(ref)
+        map = new_map[:l]
+        pose = new_pose
         #get translation of reference landmark TODO: change this to align with first landmark
         ref_x, ref_y = get_translation(ref) 
-        #create array for new shapes, append reference shape to it
-        aligned_maps = []
-        aligned_poses = []
-        aligned_maps.append(maps[0])
-        aligned_poses.append(poses[0])
+        print("**********************************")
+        print(ref)
+        print(map)
 
-        # superimpose all shapes to reference shape
-        for i in range(1, M_PARTICLES):
-            # still need to update poses here
-            new_shape, new_pose = procrustes_analysis(ref, maps[i], poses[i])
-            #new_shape, new_pose = maps[i], poses[i]
-            #new_shape[::2] = new_shape[::2] + ref_x
-            #new_shape[1::2] = new_shape[1::2] + ref_y
-            #new_pose[0] = new_pose[0] + ref_x
-            #new_pose[1] = new_pose[1] + ref_x
-            aligned_maps.append(new_shape)
-            aligned_poses.append(new_pose)
-
-        aligned_maps = np.array(aligned_maps)
-        aligned_poses = np.array(aligned_poses)
+        aligned_map, aligned_pose = procrustes_analysis(ref, map, pose)
+        #new_shape, new_pose = maps[i], poses[i]
+        #new_shape[::2] = new_shape[::2] + ref_x
+        #new_shape[1::2] = new_shape[1::2] + ref_y
+        #new_pose[0] = new_pose[0] + ref_x
+        #new_pose[1] = new_pose[1] + ref_x
         
         img = np.zeros((1000,1000,3), dtype=np.uint8)
         cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
         self.draw_real(img)
-        self.draw_best(img)
-        self.draw_particles
-        # for i in range(1, M_PARTICLES):
-        #     draw_m_2_px(img, aligned_maps[i], aligned_poses[i])
+        self.draw_best_w_num(img)
+        # self.draw_particles(img)
+        
+        draw_m_2_px(img, aligned_map, aligned_pose)
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
 
 
@@ -264,11 +279,11 @@ class ParticleFilter():
         for p in self.Xt:
             pose = (-1*floor(p.y*100) + 500, -1*floor(p.x*100) +500)
             cv2.circle(img, pose, 1, (200,170,0), cv2.FILLED)
-            for lm in p.ldmrks:
-                #lm_center = (lm.mean[1,0] - (p.y - self.y) , lm.mean[0,0] - (p.x - self.x) )
-                #lm_center = (-1*floor(lm_center[0]*100)+500, -1*floor(lm_center[1]*100)+500)
-                lm_center = (-1*floor(lm.mean[1][0]*100)+500, -1*floor(lm.mean[0][0]*100)+500)
-                cv2.circle(img, lm_center, 1, (0, 200, 255), cv2.FILLED)
+            # for lm in p.ldmrks:
+            #     #lm_center = (lm.mean[1,0] - (p.y - self.y) , lm.mean[0,0] - (p.x - self.x) )
+            #     #lm_center = (-1*floor(lm_center[0]*100)+500, -1*floor(lm_center[1]*100)+500)
+            #     lm_center = (-1*floor(lm.mean[1][0]*100)+500, -1*floor(lm.mean[0][0]*100)+500)
+            #     cv2.circle(img, lm_center, 1, (0, 200, 255), cv2.FILLED)
 
     # show robot state in an 1000X1000 image, each 100px corresponds to 1 metre
     def draw_real(self, img): #TODO add orientation to this representation so it looks nicer
@@ -300,6 +315,26 @@ class ParticleFilter():
             end = (-1*floor(y*100) + 500, -1*floor(x*100) +500)
             cv2.line(img, best_pos, end, (255, 255, 255), 1)
 
+    def draw_best_w_num(self, img):
+        max = np.argmax(self.w)
+        best_pos = (-1*floor(self.Xt[max].y*100) + 500, -1*floor(self.Xt[max].x*100) +500)
+        p = self.Xt[max]
+        arrow = (p.y + sin(p.teta)*0.3, p.x + cos(p.teta)*0.3)
+        arrow = (-1*floor(arrow[0]*100) + 500, -1*floor(arrow[1]*100) +500)
+        cv2.circle(img, best_pos, 4, (255, 255, 0), cv2.FILLED)
+        cv2.line(img, best_pos, arrow, (255, 0, 0), 3)
+        for lm in self.Xt[max].ldmrks:
+            true_lm = (-1*floor(lm.mean[1,0]*100) + 500, -1*floor(lm.mean[0,0]*100) +500)
+            cv2.circle(img, true_lm, 6, (255, 0, 255), cv2.FILLED)
+            cv2.putText(img, str(int(lm.id)), true_lm, cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 255), 1)
+
+        for z in self.sensor_data:
+            p = self.Xt[max]
+            x = p.x + z[0]*cos(pi_2_pi(p.teta + z[1]))
+            y = p.y + z[0]*sin(pi_2_pi(p.teta + z[1]))
+            end = (-1*floor(y*100) + 500, -1*floor(x*100) +500)
+            cv2.line(img, best_pos, end, (255, 255, 255), 1)        
+
     def show_state(self):
         img = np.zeros((1000,1000,3), dtype=np.uint8)
         cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
@@ -307,23 +342,6 @@ class ParticleFilter():
         #self.draw_particles(img)
         self.draw_best(img)
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
-
-    def plot(self):
-        plt.clf()
-        p = self.Xt[4]
-        i = 0
-        for p in self.Xt:           
-            plt.plot(-p.y, p.x, 'o', color=COLORS[i])
-            xl = []
-            yl = []
-            for lm in p.ldmrks:
-                xl.append(lm.mean[0,0])
-                yl.append(-lm.mean[1,0])
-            plt.plot(yl, xl, 'x', color=COLORS[i])
-            i+=1
-        plt.axis([-10,10,-10,10])
-        plt.draw()        
-        plt.pause(0.00000000001)
 
     def print_info(self):
         print("all weights")
@@ -334,20 +352,6 @@ class ParticleFilter():
         p = self.Xt[max]
         for lm in p.ldmrks:
             print(lm.sigma)
-
-    def pub_info(self):
-        poses = []
-        h = Header(self.seq, rospy.Time.now(), "base_footprint")
-        for p in self.Xt:
-            point = Point(p.x, p.y, 0)
-            quat = quaternion_from_euler(0 ,0, pi_2_pi(p.teta))
-            quat = Quaternion(quat[0], quat[1], quat[2], quat[3])
-            pose = Pose(point, quat)
-            poses.append(pose)
-        pa = PoseArray(h, poses)
-        self.particle_pub.publish(pa)
-
-    ###############################################################################################################
         
     # this is for micro simulation only
     def sense(self, map):
@@ -365,6 +369,17 @@ class ParticleFilter():
         detections = np.array(detections)
         return detections
 
+    ###############################################################################################################
+
+    def check_map_quality(self):
+        max = np.argmax(self.w)
+        av = np.zeros((2,2))
+        for lm in self.Xt[max].ldmrks:
+            av = av + lm.sigma
+        av = av / len(self.Xt[max].ldmrks)
+        print(av)
+
+
     def normalize_weights(self):        # O(M)
         sum = np.sum(self.w)
         if np.isinf(sum):
@@ -380,7 +395,10 @@ class ParticleFilter():
         #     self.w = np.ones(M_PARTICLES) / M_PARTICLES  
     
     def low_variance_resample(self):    # O(M*log(M))
-        #TODO: maybe understand & add n_eff
+        
+        n_eff = 1/(sum(self.w ** 2))
+        if n_eff < M_PARTICLES/2:
+            return self.Xt
         Xt = []
         r = np.random.uniform(0, 1/M_PARTICLES)
         c = self.w[0]
@@ -398,13 +416,26 @@ class ParticleFilter():
     # save information from ROS msgs into class variables
     def callback(self, odom, aruco):
         self.odom_data = np.array([odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z])
-        self.sensor_data = np.array(self.sense(MAP))
-        #self.sensor_data = np.array([aruco.d, aruco.teta])
+        #self.sensor_data = np.array(self.sense(MAP))
+        sensor_data = []
+        for atf in aruco.transforms:
+            x = atf.transform.translation.x
+            z = atf.transform.translation.z
+            id  = atf.fiducial_id
+            d = sqrt(x**2 + z**2)
+            teta = atan2(-1*x, z)
+            sensor_data.append([d, teta, id])
+        self.sensor_data = np.array(sensor_data)
+
+        # print(self.odom_data)
+        # print(self.sensor_data)
 
     def process(self):
-        # copy msgs info into local vari 
+        # copy msgs info into local variables 
         odom_data = np.copy(self.odom_data)
-        sensor_data = self.sensor_data
+        sensor_data = np.copy(self.sensor_data)
+        print(odom_data)
+        print(sensor_data)
 
         if self.prev[0] == 0:             # first message must be ignored in order to compute ΔT
             self.prev = odom_data
@@ -416,6 +447,12 @@ class ParticleFilter():
         if abs(odom_data[1]) < 0.007 and abs(odom_data[2]) < 0.007:         # ignore messages with very little velocities (aka only noise)
             self.prev = odom_data
             return
+
+        #print(self.counter)
+        # if self.counter == 300:
+        #     print("KIDNAPED U BITCH")
+        #     self.scatter_particles(pose = 1)
+        # self.counter +=1
 
         dT = (odom_data[0] - self.prev[0])/1000000000
         dx = self.prev[1] * dT          # use the average between self.prev and odom_data?
@@ -437,31 +474,51 @@ class ParticleFilter():
 
         # update particles based on sensor data
         if len(sensor_data) == 0:        # dont update EKFs if no landmarks were found
-            self.align_ldmrks_and_plot()
+            self.show_state()
             return
 
         # SENSOR UPDATE
         weights = []
+        ldmrks_to_update = []
         for i in range(len(self.Xt)):
             weight = 1
             for z in sensor_data:
                 max_i, p = data_association(self.Xt[i], z)
                 if p < 0.1 or max_i == -1:
                     # add new landmark
-                    landmark = new_ldmrk(self.Xt[i], z)
-                    self.Xt[i].ldmrks.append(landmark)
+                    if self.mode == "SLAM":
+                        landmark = new_ldmrk(self.Xt[i], z)
+                        self.Xt[i].ldmrks.append(landmark)
                 else:
                     # update an already found landmark
-                    w = self.Xt[i].ldmrks[max_i].update(self.Xt[i], z)
+                    w = self.Xt[i].ldmrks[max_i].comp_w8_gains(self.Xt[i], z)
+                    # add the pointer to the landmark to a list so it can be updated later
+                    ldmrks_to_update.append(self.Xt[i].ldmrks[max_i])
                     weight = weight * w
+
             weights.append(weight)
         self.w = np.array(weights)
-
+        sumw = np.sum(self.w)
         # check if weights are OK
-        #print(np.sum(self.w))
-        if np.sum(self.w) < KIDNAP_TRESH:
-            print("** SHIT I'VE BEEND KIDNAPPED, CHANGING TO LOCALIZATINO MODE **")
-            self.mode = "LOCA"
+        #print(sumw)
+        if self.mode == "SLAM":
+            if sumw < KIDNAP_TRESH:
+                print("** SHIT I'VE BEEND KIDNAPPED, CHANGING TO LOCALIZATION MODE **")
+                self.check_map_quality()
+                #self.print_info()
+                self.mode = "LOCA"
+                return
+        if self.mode =="LOCA":
+            if self.scatter_counter == 30:
+                self.scatter_particles()
+                self.scatter_counter = 0
+            self.scatter_counter +=1
+
+        # weights are ok, update landmarks
+        if self.mode == "SLAM":
+            for lm in ldmrks_to_update:
+                lm.update()
+        
         #if np.sum(self.w) < 0.001:
             # entrar em modo localization:
                 # não dar update em EKFs
@@ -471,7 +528,22 @@ class ParticleFilter():
 
         self.normalize_weights()
 
-        self.align_ldmrks_and_plot()
+        # Calculate the new best map and align it with previous best map
+        
+        #self.show_state()
+        map = []
+        best_p = self.Xt[np.argmax(self.w)]
+        for lm in best_p.ldmrks:
+            map.append([lm.mean[0,0], lm.mean[1,0]])
+        map = np.array(map).reshape(1, 2*len(map))
+        map = map.reshape(-1)
+        pose = np.array([best_p.x, best_p.y])
+        if len(self.best_map) == 0:
+            self.best_map = map
+        else:
+            l = len(self.best_map)
+            self.align_maps_and_plot(map, pose)
+            self.best_map = map
         
         # RESAMPLING
         if self.sample_counter > 10:
@@ -486,15 +558,18 @@ def main(args):
     rospy.loginfo('Initializing FastSLAM1.0 node withPython version: ' + sys.version)
 
     odom_sub = Subscriber('odom', Odometry)
-    aruco_sub = Subscriber('imu', Imu)
+    imu_sub = Subscriber('imu', Imu)
+    aruco_sub = Subscriber('fiducial_transforms', FiducialTransformArray)
     #scan_sub = Subscriber('lidar', PointCloud2)
+    
     info_pub = rospy.Publisher('info', String, queue_size=2)
     image_pub = rospy.Publisher('particles_img', Image, queue_size=2)
     particle_pub = rospy.Publisher('particles_poses', PoseArray, queue_size=2)
+    # map_pub = ... TODO: inventar um mapa
 
     pf = ParticleFilter(info_pub, image_pub, particle_pub)
     rate = rospy.Rate(10)
-    ats = ApproximateTimeSynchronizer([odom_sub, aruco_sub], queue_size=10, slop=0.3, allow_headerless=False)
+    ats = ApproximateTimeSynchronizer([odom_sub, aruco_sub], queue_size=10, slop=0.4, allow_headerless=False)
     ats.registerCallback(pf.callback)
 
     while not rospy.is_shutdown():
