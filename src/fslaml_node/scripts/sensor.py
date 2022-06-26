@@ -24,6 +24,7 @@ class ArucoConverter():
 
     # save information from ROS msgs into class variables
     def callback(self, aruco):
+        pass
         
 
 

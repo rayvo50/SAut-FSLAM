@@ -214,6 +214,13 @@ if __name__ == '__main__':
     new_shapes = []
     new_shapes.append(ref)
 
+    points = np.array(ref).reshape(-1, 2) * 50
+    print(points)
+    for p in points:
+        cv2.circle(canvas, (int(p[1]), int(p[0])), 3, (255,0,0), thickness=cv2.FILLED)
+    cv2.imshow("image", canvas)
+    cv2.waitKey(5000)
+
     
     # superimpose all shapes to reference shape
     new_shape = procrustes_analysis(ref, shape)
@@ -223,7 +230,7 @@ if __name__ == '__main__':
     new_shapes = np.array(new_shapes)
 
     new_shapes = new_shapes*50 +200
-    draw_shapes(canvas, new_shapes.astype(int))
+    #draw_shapes(canvas, new_shapes.astype(int))
 
 # if __name__ == '__main__':
     
