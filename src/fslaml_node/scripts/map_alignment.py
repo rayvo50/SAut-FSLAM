@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from operator import ne
 import sys
 import numpy as np
 from math import sqrt, pi, cos, sin, atan2, floor
@@ -60,37 +61,7 @@ class Mapper():
     def callback(self, map_msg):
         self.map_data = map_msg
         self.ok = 1
-        
-    # def process(self):
-    #     if not self.ok:
-    #         return
-    #     id = int(self.map_data.header.frame_id)
-    #     if id == self.id:
-    #         pass # plot cenas 
 
-    #     x = self.map_data.poses[0].position.x
-    #     y = self.map_data.poses[0].position.y
-    #     quat = self.map_data.poses[0].orientation
-    #     euler = euler_from_quaternion([quat.x, quat.y, quat.z, quat.w])
-    #     teta = euler[2]
-    #     self.pose = (x, y, teta)
-    #     new_map = []
-    #     for i in range(1, len(self.map_data.poses)):
-    #         new_map.append([self.map_data.poses[i].position.x, self.map_data.poses[i].position.y])
-
-    #     if len(self.map) == 0:
-    #         self.map = new_map
-    #         return
-
-    #     while len(self.map) != len(new_map):
-    #         self.map.append([0,0])
-
-    #     map = np.array(self.map)
-    #     self.map = new_map
-    #     new_map_temp = np.array(new_map)
-    #     m1, m2, M = procrustes(map, new_map_temp)
-    #     self.map = m2
-    #     self.plot()
 
     def process(self):
         if not self.ok:
@@ -109,7 +80,7 @@ class Mapper():
 
         new_map = []
         for i in range(1, len(self.map_data.poses)):
-            new_map.append([self.map_data.poses[i].position.x, self.map_data.poses[i].position.y])
+            new_map.append([self.map_data.poses[i].position.x, self.map_data.poses[i].position.y, int(self.map_data.poses[i].orientation.x)])
 
         if len(self.map) == 0:
             self.map = new_map
@@ -212,120 +183,6 @@ def plot2(old_map, new_map):
     #plt.plot(-1*self.pose[1], self.pose[0], 'o')
     plt.draw()
     plt.pause(0.00000000001)
-
-# TODO: make reference the best particle and try to always match with previous particle. this can be done in a separate node when map quality is decent
-def align_maps_and_plot(self, new_map, new_pose):
-
-    ref = self.best_map
-    l = len(ref)
-    map = new_map[:l]
-    pose = new_pose
-    #get translation of reference landmark TODO: change this to align with first landmark
-    ref_x, ref_y = get_translation(ref) 
-    print("**********************************")
-    print(ref)
-    print(map)
-
-    aligned_map, aligned_pose = procrustes_analysis(ref, map, pose)
-    #new_shape, new_pose = maps[i], poses[i]
-    #new_shape[::2] = new_shape[::2] + ref_x
-    #new_shape[1::2] = new_shape[1::2] + ref_y
-    #new_pose[0] = new_pose[0] + ref_x
-    #new_pose[1] = new_pose[1] + ref_x
-    
-    img = np.zeros((1000,1000,3), dtype=np.uint8)
-    cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
-    self.draw_real(img)
-    self.draw_best_w_num(img)
-    self.draw_particles(img)
-    
-    draw_m_2_px(img, aligned_map, aligned_pose)
-    self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
-    return aligned_map
-
-
-################################################################################################################
-    #TODO: this is an image representation, some kind of plot would be better, força malucos
-def draw_particles(self, img): 
-    for p in self.Xt:
-        pose = (-1*floor(p.y*100) + 500, -1*floor(p.x*100) +500)
-        cv2.circle(img, pose, 1, (200,170,0), cv2.FILLED)
-        # for lm in p.ldmrks:
-        #     #lm_center = (lm.mean[1,0] - (p.y - self.y) , lm.mean[0,0] - (p.x - self.x) )
-        #     #lm_center = (-1*floor(lm_center[0]*100)+500, -1*floor(lm_center[1]*100)+500)
-        #     lm_center = (-1*floor(lm.mean[1][0]*100)+500, -1*floor(lm.mean[0][0]*100)+500)
-        #     cv2.circle(img, lm_center, 1, (0, 200, 255), cv2.FILLED)
-
-# show robot state in an 1000X1000 image, each 100px corresponds to 1 metre
-def draw_real(self, img): #TODO add orientation to this representation so it looks nicer
-    true_pos = (-1*floor(self.y*100) + 500, -1*floor(self.x*100) +500)
-    arrow = (self.y + sin(self.teta)*0.3, self.x + cos(self.teta)*0.3)
-    arrow = (-1*floor(arrow[0]*100) + 500, -1*floor(arrow[1]*100) +500)
-    cv2.circle(img, true_pos, 4, (0, 255, 0), cv2.FILLED)
-    cv2.line(img, true_pos, arrow, (255, 0, 0), 3)
-    for lm in MAP:
-        true_lm = (-1*floor(lm[1]*100) + 500, -1*floor(lm[0]*100) +500)
-        cv2.circle(img, true_lm, 6, (0, 0, 255), cv2.FILLED)
-
-def draw_best(self, img):
-    max = np.argmax(self.w)
-    best_pos = (-1*floor(self.Xt[max].y*100) + 500, -1*floor(self.Xt[max].x*100) +500)
-    p = self.Xt[max]
-    arrow = (p.y + sin(p.teta)*0.3, p.x + cos(p.teta)*0.3)
-    arrow = (-1*floor(arrow[0]*100) + 500, -1*floor(arrow[1]*100) +500)
-    cv2.circle(img, best_pos, 4, (255, 255, 0), cv2.FILLED)
-    cv2.line(img, best_pos, arrow, (255, 0, 0), 3)
-    for lm in self.Xt[max].ldmrks:
-        true_lm = (-1*floor(lm.mean[1,0]*100) + 500, -1*floor(lm.mean[0,0]*100) +500)
-        cv2.circle(img, true_lm, 6, (255, 0, 255), cv2.FILLED)
-
-    for z in self.sensor_data:
-        p = self.Xt[max]
-        x = p.x + z[0]*cos(pi_2_pi(p.teta + z[1]))
-        y = p.y + z[0]*sin(pi_2_pi(p.teta + z[1]))
-        end = (-1*floor(y*100) + 500, -1*floor(x*100) +500)
-        cv2.line(img, best_pos, end, (255, 255, 255), 1)
-
-def draw_best_w_num(self, img):
-    max = np.argmax(self.w)
-    best_pos = (-1*floor(self.Xt[max].y*100) + 500, -1*floor(self.Xt[max].x*100) +500)
-    p = self.Xt[max]
-    arrow = (p.y + sin(p.teta)*0.3, p.x + cos(p.teta)*0.3)
-    arrow = (-1*floor(arrow[0]*100) + 500, -1*floor(arrow[1]*100) +500)
-    cv2.circle(img, best_pos, 4, (255, 255, 0), cv2.FILLED)
-    cv2.line(img, best_pos, arrow, (255, 0, 0), 3)
-    for lm in self.Xt[max].ldmrks:
-        true_lm = (-1*floor(lm.mean[1,0]*100) + 500, -1*floor(lm.mean[0,0]*100) +500)
-        cv2.circle(img, true_lm, 6, (255, 0, 255), cv2.FILLED)
-        cv2.putText(img, str(int(lm.id)), true_lm, cv2.FONT_HERSHEY_COMPLEX, 1, (255, 0, 255), 1)
-
-    for z in self.sensor_data:
-        p = self.Xt[max]
-        x = p.x + z[0]*cos(pi_2_pi(p.teta + z[1]))
-        y = p.y + z[0]*sin(pi_2_pi(p.teta + z[1]))
-        end = (-1*floor(y*100) + 500, -1*floor(x*100) +500)
-        cv2.line(img, best_pos, end, (255, 255, 255), 1)        
-
-def show_state(self):
-    img = np.zeros((1000,1000,3), dtype=np.uint8)
-    cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
-    self.draw_real(img)
-    #self.draw_particles(img)
-    self.draw_best(img)
-    self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))
-
-def print_info(self):
-    print("all weights")
-    print(self.w)
-    print("best particle")
-    max = np.argmax(self.w)
-    print(self.w[max])
-    p = self.Xt[max]
-    for lm in p.ldmrks:
-        print(lm.sigma)
-
-
-    ###############################################################################################################
 
 
 def main(args):

@@ -16,7 +16,7 @@ from sensor_msgs.msg import Imu, Image
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Pose, PoseArray, Point, Quaternion
 from fiducial_msgs.msg import FiducialTransformArray
-from tf.transformations import quaternion_from_euler
+from tf.transformations import quaternion_from_euler, euler_from_quaternion
 
 from proscrutes import *
 
@@ -24,10 +24,10 @@ from proscrutes import *
 M_PARTICLES = 100       # number os particles 
 KIDNAP_TRESH = 0.001     # minimum sum of weights that are acceptable during normal excution of the algorithm
 
-QT = np.diag([0.3, np.deg2rad(30)])         # sensor model covariance
+QT = np.diag([0.2, np.deg2rad(20)])         # sensor model covariance
 #R = np.diag([0.25, np.deg2rad(15)])        # motion model covariance
 
-# micro simulation
+# for micro simulation
 ROOM_SIZE = 5
 MAP = np.array([
     [2,2],
@@ -53,6 +53,7 @@ class Particle():
         self.y = y
         self.teta = teta
         self.ldmrks = ldmrks
+        self.trajectory = []
 
     def copy(self):
         new = Particle(self.x, self.y, self.teta, self.ldmrks)
@@ -178,6 +179,7 @@ class ParticleFilter():
         self.mode = "SLAM"              # "SLAM" or "LOCA" if robot is in slam mode or localization mode
         self.best_map = []
         self.time = 0
+        self.odom_traject = []
 
         # variables for saving latest ROS msgs
         self.odom_data = [0,0,0]                # latest odometry msgs
@@ -188,8 +190,6 @@ class ParticleFilter():
         self.Xt = []
         for i in range(M_PARTICLES):
             self.Xt.append(Particle(0, 0, 0, []))
-            # v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
-            # self.Xt.append(Particle(v[0], v[1], v[2], []))
         self.w = np.ones(M_PARTICLES) / M_PARTICLES
 
         #for micro simulation (true pose of robot)
@@ -215,25 +215,31 @@ class ParticleFilter():
         return detections
 
 
-    def scatter_particles(self, pose=0):
-        if pose:
-            v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
-            self.x = 2
-            self.y = -2
-            self.teta = 1.6
+    # def scatter_particles(self, pose=0):
+    #     if pose:
+    #         v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
+    #         self.x = 2
+    #         self.y = -2
+    #         self.teta = 1.6
         
-        map = self.Xt[np.argmax(self.w)].ldmrks
+    #     map = self.Xt[np.argmax(self.w)].ldmrks
     
-        for i in range(len(self.Xt)):
-            v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
-            self.Xt[i].x = v[0]
-            self.Xt[i].y = v[1]
-            self.Xt[i].teta = v[2]
-            ldmrks = []
-            for lm in map:
-                new_lm = lm.copy()
-                ldmrks.append(new_lm)
-            self.Xt[i].ldmrks = ldmrks
+    #     for i in range(len(self.Xt)):
+    #         v = np.random.uniform((-ROOM_SIZE, -ROOM_SIZE, -pi/2),(ROOM_SIZE, ROOM_SIZE, pi/2),3)
+    #         self.Xt[i].x = v[0]
+    #         self.Xt[i].y = v[1]
+    #         self.Xt[i].teta = v[2]
+    #         ldmrks = []
+    #         for lm in map:
+    #             new_lm = lm.copy()
+    #             ldmrks.append(new_lm)
+    #         self.Xt[i].ldmrks = ldmrks
+
+    def reset(self):
+        self.Xt = []
+        for i in range(M_PARTICLES):
+            self.Xt.append(Particle(0, 0, 0, []))
+        self.w = np.ones(M_PARTICLES) / M_PARTICLES
 
 
     def check_map_quality(self):
@@ -286,10 +292,9 @@ class ParticleFilter():
         poses.append(pose)
         
         # next poses in the array represent the landmarks
-        quat = quaternion_from_euler(0 ,0, 0)
-        quat = Quaternion(quat[0], quat[1], quat[2], quat[3])
         for lm in p.ldmrks:
             point = Point(lm.mean[0,0], lm.mean[1,0], 0)
+            quat = Quaternion(lm.id, lm.id, lm.id, lm.id)
             pose = Pose(point, quat)
             poses.append(pose)
         pa = PoseArray(h, poses)
@@ -298,16 +303,18 @@ class ParticleFilter():
 
     def statistics(self):
         index = np.argmax(self.w)
-        s = 0
+        s1 = 0
+        s2 = 0
         cnt = 0
         for lm in self.Xt[index].ldmrks:
             print(lm.sigma)
-            s += lm.sigma[0,0] ** 2 + lm.sigma[1,1] ** 2
-            cnt += 2
-        ms = s/cnt
-        rms = sqrt(ms)
-        print(rms)
-        plt.plot(self.iter, rms, 'o')
+            s1 += lm.sigma[0,0]
+            s2 += lm.sigma[1,1]
+            cnt += 1
+        s1 = s1/cnt
+        s2 = s2/cnt
+        s = (s1+s2)/2
+        plt.plot(self.iter, s, 'o')
         plt.draw()        
         plt.pause(0.00000000001)
 
@@ -345,33 +352,51 @@ class ParticleFilter():
     def show_state(self):
         img = np.zeros((1000,1000,3), dtype=np.uint8)
         cv2.rectangle(img, (0,0), (img.shape[0], img.shape[1]), (100, 50, 255), 2)
-        self.draw_real(img)
+        #self.draw_real(img)
         #self.draw_particles(img)
         self.draw_best(img)
         self.img_pub.publish(self.bridge.cv2_to_imgmsg(img))     
+
+    def plot_w_trajectory(self):
+        plt.clf()
+        max = np.argmax(self.w)
+        p = self.Xt[max]
+        tra = np.array(p.trajectory)
+        print(tra)
+        x = tra[:,0]
+        y = tra[:,1]
+        plt.plot(-1*y, x, 'bx')
+        tra = np.array(self.odom_traject)
+        x = tra[:,0]
+        y = tra[:,1]
+        plt.plot(-1*y, x, 'rx')
+        plt.axis([-0.2,0.2, -4,4])
+        plt.draw()
+        plt.pause(0.00000000001)
 
 
     # save information from ROS msgs into class variables
     def callback(self, odom, aruco):
         self.odom_data = np.array([odom.header.stamp.nsecs + odom.header.stamp.secs*1000000000, odom.twist.twist.linear.x, odom.twist.twist.angular.z])
-        self.sensor_data = np.array(self.sense(MAP))
-        # sensor_data = []
-        # for atf in aruco.transforms:
-        #     x = atf.transform.translation.x
-        #     z = atf.transform.translation.z
-        #     id  = atf.fiducial_id
-        #     d = sqrt(x**2 + z**2)
-        #     teta = atan2(-1*x, z)
-        #     sensor_data.append([d, teta, id])
-        # self.sensor_data = np.array(sensor_data)
-
-        # print(self.odom_data)
-        # print(self.sensor_data)
+        
+        # self.sensor_data = np.array(self.sense(MAP))
+        sensor_data = []
+        for atf in aruco.transforms:
+            x = atf.transform.translation.x
+            z = atf.transform.translation.z
+            id  = atf.fiducial_id
+            if id == 19:
+                id = 1
+            d = sqrt(x**2 + z**2)
+            teta = atan2(-1*x, z)
+            if d < 4 and d > 0.5:
+                sensor_data.append([d, teta, id])
+        self.sensor_data = np.array(sensor_data)
 
     def process(self):
         # copy msgs info into local variables 
         odom_data = np.copy(self.odom_data)
-        sensor_data = np.copy(self.sensor_data)
+        sensor_data = np.copy(self.sensor_data)      
 
         self.time = rospy.Time.now()
         self.iter +=1
@@ -387,12 +412,6 @@ class ParticleFilter():
             self.prev = odom_data
             return
 
-        #print(self.counter)
-        # if self.counter == 300:
-        #     print("KIDNAPED U BITCH")
-        #     self.scatter_particles(pose = 1)
-        # self.counter +=1
-
         dT = (odom_data[0] - self.prev[0])/1000000000
         dx = self.prev[1] * dT          # use the average between self.prev and odom_data?
         dteta = self.prev[2] * dT
@@ -405,15 +424,19 @@ class ParticleFilter():
 
         # update particles with input:
         for i in range(len(self.Xt)):
-            self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(5*1.645))))*cos(self.Xt[i].teta)
-            self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(5*1.645))))*sin(self.Xt[i].teta)
-            self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/5)))
+            self.Xt[i].x += (dx + np.random.normal(0, abs(dx/(2*1.645))))*cos(self.Xt[i].teta)
+            self.Xt[i].y += (dx + np.random.normal(0, abs(dx/(2*1.645))))*sin(self.Xt[i].teta)
+            self.Xt[i].teta += (dteta + np.random.normal(0, abs(dteta/2)))
             self.Xt[i].teta = pi_2_pi(self.Xt[i].teta)
+
+            self.Xt[i].trajectory.append([self.Xt[i].x, self.Xt[i].y])
+        self.odom_traject.append([self.x, self.y])
 
         # update particles based on sensor data
         if len(sensor_data) == 0:        # dont update EKFs if no landmarks were found
             self.show_state()
-            #self.statistics()
+            self.pub_map_w_id()
+            self.plot_w_trajectory()
             return
 
         # SENSOR UPDATE
@@ -425,9 +448,8 @@ class ParticleFilter():
                 max_i, p = data_association(self.Xt[i], z)
                 if p < 0.1 or max_i == -1:
                     # add new landmark
-                    if self.mode == "SLAM":
-                        landmark = new_ldmrk(self.Xt[i], z)
-                        self.Xt[i].ldmrks.append(landmark)
+                    landmark = new_ldmrk(self.Xt[i], z)
+                    self.Xt[i].ldmrks.append(landmark)
                 else:
                     # update an already found landmark
                     w = self.Xt[i].ldmrks[max_i].comp_w8_gains(self.Xt[i], z)
@@ -440,41 +462,23 @@ class ParticleFilter():
         sumw = np.sum(self.w)
 
         # check if weights are OK
-        # if self.mode == "SLAM":
-        #     if sumw < KIDNAP_TRESH:
-        #         print("** SHIT I'VE BEEND KIDNAPPED, CHANGING TO LOCALIZATION MODE **")
-        #         self.check_map_quality()
-        #         #self.print_info()
-        #         self.mode = "LOCA"
-        #         return
-        # if self.mode =="LOCA":
-        #     if self.scatter_counter == 30:
-        #         self.scatter_particles()
-        #         self.scatter_counter = 0
-        #     self.scatter_counter +=1
+        if sumw < KIDNAP_TRESH:
+            self.reset()
+            return
 
         # weights are ok, update landmarks
-        if self.mode == "SLAM":
-            for lm in ldmrks_to_update:
-                lm.update()
-        
-        #if np.sum(self.w) < 0.001:
-            # entrar em modo localization:
-                # não dar update em EKFs
-                # espalhar bué as partículas
-                # calcular spreadness nas particulas e ver quando é que a partir de m certro valor a localization está done
-                # voltar a passar para o modo slam
+        for lm in ldmrks_to_update:
+            lm.update()
 
         self.show_state()
-        #self.statistics()
-        self.normalize_weights()
         self.pub_map_w_id()
+        #self.statistics()
+        self.plot_w_trajectory()
 
-        # RESAMPLING
-        if self.sample_counter > 10:
-            self.Xt = self.low_variance_resample()
-            self.sample_counter = 0
-        self.sample_counter +=1
+        self.normalize_weights()
+        # # RESAMPLING
+        self.Xt = self.low_variance_resample()
+
 
 
 def main(args):
@@ -493,8 +497,8 @@ def main(args):
     # map_pub = ... TODO: inventar um mapa
 
     pf = ParticleFilter(info_pub, map_pub, image_pub)
-    rate = rospy.Rate(10)
-    ats = ApproximateTimeSynchronizer([odom_sub, imu_sub], queue_size=10, slop=0.3, allow_headerless=False)
+    rate = rospy.Rate(5)
+    ats = ApproximateTimeSynchronizer([odom_sub, aruco_sub], queue_size=200, slop=0.01, allow_headerless=False)
     ats.registerCallback(pf.callback)
 
     while not rospy.is_shutdown():
